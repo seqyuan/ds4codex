@@ -1,0 +1,62 @@
+name: Auto Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get tag name
+        id: tag
+        run: echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          VERSION=${TAG_NAME#v}
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release notes
+        run: |
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          VERSION=${TAG_NAME#v}
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+
+          if [ -z "$PREVIOUS_TAG" ]; then
+            RELEASE_NOTES=$(git log --pretty=format:"- %s (%h)" --reverse)
+          else
+            RELEASE_NOTES=$(git log "${PREVIOUS_TAG}..HEAD" --pretty=format:"- %s (%h)")
+          fi
+
+          {
+            echo "## Release ${TAG_NAME}"
+            echo
+            echo "### Changes"
+            echo "${RELEASE_NOTES}"
+            echo
+            echo "### Installation"
+            echo '```bash'
+            echo "pip install ds4codex==${VERSION} -i https://pypi.org/simple"
+            echo '```'
+          } > release_notes.md
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.TAG_NAME }}
+          name: Release ${{ steps.tag.outputs.TAG_NAME }}
+          body_path: release_notes.md
+          draft: false
+          prerelease: false
