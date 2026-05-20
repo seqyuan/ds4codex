@@ -426,7 +426,7 @@ def _translate_input_item(item: Any) -> dict[str, Any] | None:
 
     item_type = item.get("type", "message")
     if item_type == "message":
-        role = item.get("role", "user")
+        role = _normalize_chat_role(item.get("role", "user"))
         content = _content_to_text(item.get("content", ""))
         return {"role": role, "content": content}
 
@@ -457,6 +457,16 @@ def _translate_input_item(item: Any) -> dict[str, Any] | None:
         }
 
     return None
+
+
+def _normalize_chat_role(role: Any) -> str:
+    """Map Responses roles to the Chat Completions roles DeepSeek accepts."""
+    normalized = str(role or "user").strip().lower()
+    if normalized == "developer":
+        return "system"
+    if normalized in {"system", "user", "assistant", "tool", "latest_reminder"}:
+        return normalized
+    return "user"
 
 
 def _content_to_text(content: Any) -> str:

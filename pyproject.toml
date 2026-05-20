@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "ds4codex"
-version = "0.1.2"
+version = "0.1.3"
 description = "Responses API to Chat Completions proxy for Codex-compatible model providers."
 authors = ["Yuan Zan <yfinddream@gmail.com>"]
 readme = "README.md"

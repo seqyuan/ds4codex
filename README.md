@@ -224,6 +224,8 @@ Then confirm `~/.codex/config.toml` contains `model_catalog_json` pointing to an
 
 If `ds4codex init` previously failed with `PermissionError: [Errno 13] Permission denied: 'codex'`, upgrade to `ds4codex >= 0.1.2`. Current versions fall back to the built-in model template when local `codex` cannot be executed.
 
+If DeepSeek returns `messages[0].role: unknown variant developer`, upgrade to `ds4codex >= 0.1.3`. Current versions map Codex `developer` messages to DeepSeek-compatible `system` messages.
+
 If requests fail with an API-key error, check that one of these is true:
 
 - `experimental_bearer_token` in `~/.codex/config.toml` contains a real DeepSeek key
