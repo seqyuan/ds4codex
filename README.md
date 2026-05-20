@@ -226,6 +226,8 @@ If `ds4codex init` previously failed with `PermissionError: [Errno 13] Permissio
 
 If DeepSeek returns `messages[0].role: unknown variant developer`, upgrade to `ds4codex >= 0.1.3`. Current versions map Codex `developer` messages to DeepSeek-compatible `system` messages.
 
+If DeepSeek returns `tools[0]: missing field function`, upgrade to `ds4codex >= 0.1.4`. Current versions map Codex Responses-style function tools to the nested Chat Completions `function` shape DeepSeek expects.
+
 If requests fail with an API-key error, check that one of these is true:
 
 - `experimental_bearer_token` in `~/.codex/config.toml` contains a real DeepSeek key

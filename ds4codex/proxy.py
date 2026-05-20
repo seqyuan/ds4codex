@@ -64,13 +64,11 @@ def responses_to_chat(body: dict[str, Any], *, default_thinking: str) -> dict[st
 
     tools = body.get("tools", [])
     if tools:
-        chat["tools"] = [
-            {"type": "function", "function": tool} if isinstance(tool, dict) and "type" not in tool else tool
-            for tool in tools
-        ]
+        translated_tools = [_translate_tool(tool) for tool in tools]
+        chat["tools"] = [tool for tool in translated_tools if tool is not None]
 
     if "tool_choice" in body:
-        chat["tool_choice"] = body["tool_choice"]
+        chat["tool_choice"] = _translate_tool_choice(body["tool_choice"])
 
     thinking_payload, reasoning_effort = _resolve_thinking_controls(body.get("reasoning"), default_thinking)
     chat["thinking"] = thinking_payload
@@ -457,6 +455,37 @@ def _translate_input_item(item: Any) -> dict[str, Any] | None:
         }
 
     return None
+
+
+def _translate_tool(tool: Any) -> dict[str, Any] | None:
+    if not isinstance(tool, dict):
+        return None
+
+    if tool.get("type") == "function" and isinstance(tool.get("function"), dict):
+        return tool
+
+    function = {key: value for key, value in tool.items() if key != "type" and value is not None}
+    if "name" not in function:
+        return None
+
+    return {"type": "function", "function": function}
+
+
+def _translate_tool_choice(tool_choice: Any) -> Any:
+    if not isinstance(tool_choice, dict):
+        return tool_choice
+
+    choice_type = tool_choice.get("type")
+    if choice_type in {"auto", "none", "required"}:
+        return choice_type
+
+    if choice_type == "function" and isinstance(tool_choice.get("function"), dict):
+        return tool_choice
+
+    if "name" in tool_choice:
+        return {"type": "function", "function": {"name": tool_choice["name"]}}
+
+    return tool_choice
 
 
 def _normalize_chat_role(role: Any) -> str:
