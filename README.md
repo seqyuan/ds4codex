@@ -1,51 +1,61 @@
 # ds4codex
 
-`ds4codex` is a small local proxy that lets Codex use DeepSeek models through a Responses-to-Chat translation layer.
+`ds4codex` lets Codex use DeepSeek models through a small local proxy.
 
-The current shape is intentionally simple:
+Codex talks to custom providers with the Responses API shape. DeepSeek exposes a Chat Completions compatible API. `ds4codex` sits between them and translates requests, responses, streaming events, tool calls, and thinking-mode options.
 
-- only one human-edited config file: `~/.codex/config.toml`
-- one generated file for `/model`: `~/.codex/ds4codex-model-catalog.json`
-- only two CLI commands: `init` and `run`
+The package keeps the user-facing setup intentionally small:
+
+- one human-edited config file: `~/.codex/config.toml`
+- one generated model catalog for Codex `/model`: `~/.codex/ds4codex-model-catalog.json`
+- two CLI commands: `ds4codex init` and `ds4codex run`
 
 ## Install
 
-```bash
-cd /Volumes/data/github/seqyuan/ds4codex
-pip install .
-```
-
-or:
+Install from PyPI:
 
 ```bash
-pipx install .
+pip install ds4codex -i https://pypi.org/simple
 ```
 
-## Commands
+For local development from this repository:
 
-Initialize Codex config and model catalog:
+```bash
+pip install -e .
+```
+
+## Quick Start
+
+Initialize Codex and write your DeepSeek API key into the managed provider block:
 
 ```bash
 ds4codex init --apikey sk-your-deepseek-api-key
 ```
 
-`init` will try to reuse Codex's bundled model schema when `codex` is available, but it no longer requires a working local `codex` executable.
-
-Start the proxy:
+Start the local proxy:
 
 ```bash
 ds4codex run
 ```
 
-## What `init` Writes
+Keep `ds4codex run` running while using Codex. Codex will connect to `http://127.0.0.1:8099/v1`.
 
-`ds4codex init` updates `~/.codex/config.toml` and generates:
+After initialization, start Codex and use `/model` to choose:
+
+- `DeepSeek V4 Flash`
+- `DeepSeek V4 Pro`
+
+## What `init` Does
+
+`ds4codex init` writes managed blocks into `~/.codex/config.toml` and generates the model catalog JSON used by Codex `/model`.
+
+Generated file:
 
 ```text
 ~/.codex/ds4codex-model-catalog.json
 ```
 
-It writes three managed blocks into `~/.codex/config.toml`:
+Codex config blocks:
 
 ```toml
 # BEGIN DS4CODEX ROOT
@@ -71,9 +81,44 @@ experimental_bearer_token = "sk-your-deepseek-api-key"
 # END DS4CODEX PROVIDER
 ```
 
-## Where Settings Live
+If `~/.codex/config.toml` already exists, `init` preserves existing user config and only adds or refreshes the managed ds4codex blocks.
 
-The proxy now reads its local runtime settings from:
+Useful options:
+
+```bash
+ds4codex init --apikey sk-your-deepseek-api-key
+ds4codex init --force
+ds4codex init --config-path /path/to/config.toml
+ds4codex init --model-catalog-path /path/to/ds4codex-model-catalog.json
+```
+
+## Model Catalog
+
+The model catalog is required for a good Codex `/model` experience. It is a JSON file, not a directory.
+
+`ds4codex init` points Codex at the catalog through:
+
+```toml
+model_catalog_json = "/home/you/.codex/ds4codex-model-catalog.json"
+```
+
+The catalog makes Codex aware of the two DeepSeek entries:
+
+- `deepseek-v4-flash`
+- `deepseek-v4-pro`
+
+It also advertises Codex reasoning choices:
+
+- `low`
+- `medium`
+- `high`
+- `xhigh`
+
+`ds4codex` first tries to reuse Codex's bundled model schema when the local `codex` executable is available. If `codex` is missing, not executable, or fails, `ds4codex` uses its own built-in template. This means `ds4codex init` does not require a working local `codex` binary.
+
+## Runtime Settings
+
+The proxy reads runtime settings from the `[ds4codex]` section inside `~/.codex/config.toml`:
 
 ```toml
 [ds4codex]
@@ -82,52 +127,106 @@ target_url = "https://api.deepseek.com/v1/chat/completions"
 thinking = "disabled"
 ```
 
-That means `~/.config/ds4codex/config.toml` is no longer needed.
+`~/.config/ds4codex/config.toml` is not used.
 
-`thinking` is only the default when Codex does not send an explicit reasoning level.
+Runtime values can also be overridden from the CLI:
 
-Accepted practical values are:
+```bash
+ds4codex run --port 8099
+ds4codex run --target-url https://api.deepseek.com/v1/chat/completions
+ds4codex run --thinking high
+```
+
+or with environment variables:
+
+```bash
+DS4CODEX_PORT=8099 ds4codex run
+DS4CODEX_TARGET_URL=https://api.deepseek.com/v1/chat/completions ds4codex run
+DS4CODEX_THINKING=high ds4codex run
+```
+
+## API Key Handling
+
+The recommended path is:
+
+```bash
+ds4codex init --apikey sk-your-deepseek-api-key
+```
+
+This writes the token into:
+
+```toml
+[model_providers.ds4codex]
+experimental_bearer_token = "sk-your-deepseek-api-key"
+```
+
+Codex sends that token to the local proxy as the incoming bearer token, and the proxy forwards it to DeepSeek.
+
+Alternative runtime sources are also supported:
+
+```bash
+DS4CODEX_API_KEY=sk-your-deepseek-api-key ds4codex run
+DEEPSEEK_API_KEY=sk-your-deepseek-api-key ds4codex run
+ds4codex run --api-key sk-your-deepseek-api-key
+```
+
+## Thinking Mode
+
+`thinking` in `[ds4codex]` is only the default used when Codex does not send an explicit reasoning level.
+
+Accepted practical values:
 
 - `disabled`
 - `enabled`
 - `high`
 - `max`
 
-Compatibility mapping is applied for Codex-style reasoning levels:
-
-- `low`, `medium`, `minimal` -> `high`
-- `xhigh` -> `max`
-
-## Why the Proxy Is Still Required
-
-Moving settings into `~/.codex/config.toml` makes configuration cleaner, but it does not remove the need for the server itself.
-
-Codex custom providers send:
-
-- `wire_api = "responses"`
-
-DeepSeek currently documents:
-
-- `chat.completions`
-
-So the proxy is still the protocol adapter between Codex Responses requests and DeepSeek Chat Completions requests.
-
-## `/model` Support
-
-`ds4codex init` generates a model catalog JSON and points Codex at it through `model_catalog_json`.
-
-This is a file, not a directory. Its only purpose is to make Codex's `/model` menu aware of the custom DeepSeek entries exposed through `ds4codex`.
-
-That makes `/model` show:
-
-- `DeepSeek V4 Flash`
-- `DeepSeek V4 Pro`
-
-and the catalog advertises these reasoning levels:
+Codex `/model` exposes these reasoning levels through the generated catalog:
 
 - `low`
 - `medium`
 - `high`
 - `xhigh`
 
-The proxy maps those levels to DeepSeek-compatible request fields before forwarding upstream.
+DeepSeek currently documents `high` and `max` for reasoning effort, so `ds4codex` maps Codex-style values before forwarding upstream:
+
+- `low`, `medium`, `minimal` -> `high`
+- `high` -> `high`
+- `xhigh` -> `max`
+
+## Why the Proxy Is Required
+
+The proxy is still required even though configuration lives in `~/.codex/config.toml`.
+
+Codex custom providers use:
+
+```toml
+wire_api = "responses"
+```
+
+DeepSeek uses a Chat Completions compatible endpoint:
+
+```text
+https://api.deepseek.com/v1/chat/completions
+```
+
+`ds4codex` translates between those two protocols.
+
+## Troubleshooting
+
+If `/model` does not show DeepSeek models, rerun:
+
+```bash
+ds4codex init --force
+```
+
+Then confirm `~/.codex/config.toml` contains `model_catalog_json` pointing to an existing `ds4codex-model-catalog.json` file.
+
+If `ds4codex init` previously failed with `PermissionError: [Errno 13] Permission denied: 'codex'`, upgrade to `ds4codex >= 0.1.2`. Current versions fall back to the built-in model template when local `codex` cannot be executed.
+
+If requests fail with an API-key error, check that one of these is true:
+
+- `experimental_bearer_token` in `~/.codex/config.toml` contains a real DeepSeek key
+- `DS4CODEX_API_KEY` is set when running `ds4codex run`
+- `DEEPSEEK_API_KEY` is set when running `ds4codex run`
+- `ds4codex run --api-key ...` was used
