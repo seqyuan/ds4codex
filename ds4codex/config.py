@@ -177,13 +177,14 @@ def init_all_configs(
     *,
     codex_config_path: str | os.PathLike[str] | None = None,
     model_catalog_path: str | os.PathLike[str] | None = None,
+    port: int | None = None,
     apikey: str | None = None,
     force: bool = False,
 ) -> InitResult:
     """Initialize ~/.codex/config.toml and the generated model catalog."""
     codex_path = resolve_codex_config_path(codex_config_path)
     existing_config = load_config(codex_path)
-    proxy_settings = resolve_proxy_settings(existing_config)
+    proxy_settings = resolve_proxy_settings(existing_config, port=port)
 
     catalog_path = resolve_model_catalog_path(model_catalog_path)
     wrote_catalog = write_model_catalog(catalog_path, force=force)

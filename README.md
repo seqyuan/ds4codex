@@ -86,6 +86,7 @@ If `~/.codex/config.toml` already exists, `init` preserves existing user config 
 Useful options:
 
 ```bash
+ds4codex init --port 9123
 ds4codex init --apikey sk-your-deepseek-api-key
 ds4codex init --force
 ds4codex init --config-path /path/to/config.toml
@@ -218,6 +219,12 @@ If `/model` does not show DeepSeek models, rerun:
 
 ```bash
 ds4codex init --force
+```
+
+If you need a different local port, rerun:
+
+```bash
+ds4codex init --port 9123
 ```
 
 Then confirm `~/.codex/config.toml` contains `model_catalog_json` pointing to an existing `ds4codex-model-catalog.json` file.

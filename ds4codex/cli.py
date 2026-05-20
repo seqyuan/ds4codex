@@ -34,11 +34,13 @@ def main() -> None:
     default=None,
     help="Custom generated model catalog JSON path",
 )
+@click.option("--port", type=int, default=None, help="Default ds4codex port to write into ~/.codex/config.toml")
 @click.option("--apikey", "--api-key", default=None, help="Write upstream bearer token into ~/.codex/config.toml")
 @click.option("--force", is_flag=True, help="Overwrite managed ds4codex artifacts")
 def init_command(
     config_path: Path | None,
     model_catalog_path: Path | None,
+    port: int | None,
     apikey: str | None,
     force: bool,
 ) -> None:
@@ -46,6 +48,7 @@ def init_command(
     result = init_all_configs(
         codex_config_path=config_path,
         model_catalog_path=model_catalog_path,
+        port=port,
         apikey=apikey,
         force=force,
     )
