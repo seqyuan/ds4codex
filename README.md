@@ -29,6 +29,8 @@ Initialize Codex config and model catalog:
 ds4codex init --apikey sk-your-deepseek-api-key
 ```
 
+`init` will try to reuse Codex's bundled model schema when `codex` is available, but it no longer requires a working local `codex` executable.
+
 Start the proxy:
 
 ```bash
@@ -113,6 +115,8 @@ So the proxy is still the protocol adapter between Codex Responses requests and 
 ## `/model` Support
 
 `ds4codex init` generates a model catalog JSON and points Codex at it through `model_catalog_json`.
+
+This is a file, not a directory. Its only purpose is to make Codex's `/model` menu aware of the custom DeepSeek entries exposed through `ds4codex`.
 
 That makes `/model` show:
 

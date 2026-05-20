@@ -35,6 +35,51 @@ SETTINGS_MARKER_END = "# END DS4CODEX SETTINGS"
 PROVIDER_MARKER_START = "# BEGIN DS4CODEX PROVIDER"
 PROVIDER_MARKER_END = "# END DS4CODEX PROVIDER"
 DEFAULT_BEARER_PLACEHOLDER = "sk-your-deepseek-api-key"
+FALLBACK_MODEL_MESSAGES = {
+    "instructions_template": "",
+    "instructions_variables": {
+        "personality_default": "",
+        "personality_friendly": "",
+        "personality_pragmatic": "",
+    },
+}
+FALLBACK_TEMPLATE_MODEL: dict[str, Any] = {
+    "slug": "template",
+    "display_name": "Template",
+    "description": "Fallback model template bundled with ds4codex",
+    "default_reasoning_level": "medium",
+    "supported_reasoning_levels": [
+        {"effort": "low", "description": "Fast responses with lighter reasoning"},
+        {"effort": "medium", "description": "Balances speed and reasoning depth for everyday tasks"},
+        {"effort": "high", "description": "Greater reasoning depth for complex problems"},
+        {"effort": "xhigh", "description": "Extra high reasoning depth for complex problems"},
+    ],
+    "shell_type": "shell_command",
+    "visibility": "list",
+    "supported_in_api": True,
+    "priority": 0,
+    "additional_speed_tiers": [],
+    "service_tiers": [],
+    "availability_nux": None,
+    "upgrade": None,
+    "base_instructions": "",
+    "model_messages": FALLBACK_MODEL_MESSAGES,
+    "supports_reasoning_summaries": True,
+    "default_reasoning_summary": "none",
+    "support_verbosity": True,
+    "default_verbosity": "low",
+    "apply_patch_tool_type": "freeform",
+    "web_search_tool_type": "text_and_image",
+    "truncation_policy": {"mode": "tokens", "limit": 10000},
+    "supports_parallel_tool_calls": True,
+    "supports_image_detail_original": True,
+    "context_window": 1048576,
+    "max_context_window": 1048576,
+    "effective_context_window_percent": 95,
+    "experimental_supported_tools": [],
+    "input_modalities": ["text", "image"],
+    "supports_search_tool": True,
+}
 
 
 @dataclass(frozen=True)
@@ -181,24 +226,22 @@ def write_model_catalog(
 
 
 def load_codex_template_model() -> dict[str, Any]:
-    """Load one existing model entry from Codex and use it as a schema template."""
+    """Load a model entry from Codex, falling back to a bundled template when needed."""
     try:
         result = subprocess.run(
-            ["codex", "debug", "models"],
+            ["codex", "debug", "models", "--bundled"],
             check=True,
             capture_output=True,
             text=True,
         )
-    except FileNotFoundError as exc:
-        raise RuntimeError("`codex` is not installed or not on PATH.") from exc
-    except subprocess.CalledProcessError as exc:
-        raise RuntimeError(f"`codex debug models` failed: {exc.stderr.strip() or exc.stdout.strip()}") from exc
+    except (FileNotFoundError, PermissionError, subprocess.CalledProcessError):
+        return copy.deepcopy(FALLBACK_TEMPLATE_MODEL)
 
     try:
         payload = json.loads(result.stdout)
         return payload["models"][0]
-    except (KeyError, IndexError, json.JSONDecodeError) as exc:
-        raise RuntimeError("Unable to parse model template from `codex debug models`.") from exc
+    except (KeyError, IndexError, json.JSONDecodeError):
+        return copy.deepcopy(FALLBACK_TEMPLATE_MODEL)
 
 
 def build_model_catalog(template_model: dict[str, Any]) -> dict[str, Any]:
