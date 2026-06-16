@@ -195,6 +195,32 @@ DeepSeek currently documents `high` and `max` for reasoning effort, so `ds4codex
 - `high` -> `high`
 - `xhigh` -> `max`
 
+## What's New in 0.1.6 — Tool Call Fixes
+
+v0.1.6 fixes several critical tool-call issues discovered by comparing
+`ds4codex` against the mature `annodex` translation layer. Without these
+fixes, multi-turn tool use (especially with streaming) would silently fail
+or produce incomplete results.
+
+- **`reasoning_content` injection for DeepSeek tool calls** — DeepSeek rejects
+  assistant messages carrying `tool_calls` without `reasoning_content`.
+  Every `function_call` and `custom_tool_call` now includes the required
+  placeholder.
+- **Streaming tool-call deltas** — `translate_stream` now processes
+  `delta.tool_calls` incrementally, emitting proper
+  `response.output_item.added` / `function_call_arguments.delta` / `.done`
+  events.
+- **Inline `<think>` tag parsing** — providers that embed reasoning inside
+  `<think>...</think>` tags instead of using the `reasoning_content` delta
+  field are now supported.
+- **Namespace tool expansion** — `type: "namespace"` tool definitions (used
+  by MCP servers) are flattened into `namespace__tool` entries that Chat
+  Completions APIs consume.
+- **`custom_tool_call` / `custom_tool_call_output` support** — previously
+  dropped silently; now mapped to standard assistant/tool message format.
+
+See [CHANGELOG.md](CHANGELOG.md) for full release history.
+
 ## Why the Proxy Is Required
 
 The proxy is still required even though configuration lives in `~/.codex/config.toml`.
@@ -214,6 +240,19 @@ https://api.deepseek.com/v1/chat/completions
 `ds4codex` translates between those two protocols.
 
 ## Troubleshooting
+
+### Tool call errors
+
+If tool calls fail silently or DeepSeek returns errors about missing fields
+when Codex attempts tool use, upgrade to `ds4codex >= 0.1.6`:
+
+```bash
+pip install --upgrade ds4codex -i https://pypi.org/simple
+```
+
+If streaming tool calls stop mid-way or produce incomplete results, make sure
+you are on 0.1.6 or later. The streaming translator in earlier versions only
+forwarded text deltas and could not relay tool calls in streaming mode.
 
 If `/model` does not show DeepSeek models, rerun:
 

@@ -46,7 +46,7 @@ def responses_to_chat(body: dict[str, Any], *, default_thinking: str) -> dict[st
         if translated is not None:
             messages.append(translated)
 
-    chat["messages"] = messages
+    chat["messages"] = _ensure_tool_reasoning(messages)
 
     passthrough = {
         "temperature": "temperature",
@@ -64,8 +64,14 @@ def responses_to_chat(body: dict[str, Any], *, default_thinking: str) -> dict[st
 
     tools = body.get("tools", [])
     if tools:
-        translated_tools = [_translate_tool(tool) for tool in tools]
-        chat["tools"] = [tool for tool in translated_tools if tool is not None]
+        translated_tools: list[dict[str, Any]] = []
+        for tool in tools:
+            result = _translate_tool(tool)
+            if isinstance(result, list):
+                translated_tools.extend(result)
+            elif result is not None:
+                translated_tools.append(result)
+        chat["tools"] = translated_tools
 
     if "tool_choice" in body:
         chat["tool_choice"] = _translate_tool_choice(body["tool_choice"])
@@ -133,9 +139,15 @@ def chat_to_responses(chat_resp: dict[str, Any], model: str) -> dict[str, Any]:
 
 
 async def translate_stream(source: Any, write: Any, model: str) -> None:
-    """Translate Chat Completions SSE chunks into Responses API SSE events."""
+    """Translate Chat Completions SSE chunks into Responses API SSE events.
+
+    Handles streaming deltas for text, reasoning_content, and tool_calls,
+    including inline <think> tag parsing and incremental tool-call argument
+    accumulation.
+    """
     response_id = f"resp_{uuid.uuid4().hex[:24]}"
     message_id = f"msg_{uuid.uuid4().hex[:24]}"
+    reasoning_id = f"rs_{response_id}"
     created_at = int(time.time())
 
     empty_response = {
@@ -154,11 +166,25 @@ async def translate_stream(source: Any, write: Any, model: str) -> None:
         {"type": "response.in_progress", "response": empty_response},
     )
 
+    # Streaming state
     full_text = ""
+    reasoning_text = ""
     final_usage: dict[str, Any] | None = None
-    item_started = False
-    content_started = False
+    text_item_started = False
+    text_content_started = False
+    reasoning_started = False
+    reasoning_summary_started = False
+    output_index: int = 0
+
+    # Inline <think> tag state (for providers that embed reasoning in content)
+    inline_think_mode = "detecting"  # "detecting" | "reasoning" | "text"
+    inline_think_buffer = ""
+
+    # Tool call accumulation: keyed by tool call index
+    tool_call_state: dict[int, dict[str, Any]] = {}
+
     buffer = ""
+    finish_reason: str | None = None
 
     async for chunk, _ in source:
         buffer += chunk.decode("utf-8", errors="replace")
@@ -181,20 +207,100 @@ async def translate_stream(source: Any, write: Any, model: str) -> None:
 
             choices = data.get("choices", [])
             if not choices:
+                if "usage" in data:
+                    final_usage = data["usage"]
                 continue
 
-            delta = choices[0].get("delta", {})
-            chunk_text = delta.get("reasoning_content") or delta.get("content") or ""
-            if chunk_text:
-                full_text += chunk_text
-                if not item_started:
-                    item_started = True
-                    await _write_event(
-                        write,
-                        "response.output_item.added",
-                        {
+            choice = choices[0]
+            if isinstance(choice.get("finish_reason"), str):
+                finish_reason = choice["finish_reason"]
+            if "usage" in data:
+                final_usage = data["usage"]
+
+            delta = choice.get("delta", {})
+
+            # --- Reasoning content (explicit reasoning_content / reasoning field) ---
+            rc_delta = delta.get("reasoning_content") or delta.get("reasoning")
+            if rc_delta:
+                if not reasoning_started:
+                    reasoning_started = True
+                    await _write_event(write, "response.output_item.added", {
+                        "type": "response.output_item.added",
+                        "output_index": output_index,
+                        "item": {
+                            "id": reasoning_id,
+                            "type": "reasoning",
+                            "status": "in_progress",
+                            "reasoning_content": "",
+                            "summary": [],
+                        },
+                    })
+                    output_index += 1
+                if not reasoning_summary_started:
+                    reasoning_summary_started = True
+                    await _write_event(write, "response.reasoning_summary_part.added", {
+                        "type": "response.reasoning_summary_part.added",
+                        "item_id": reasoning_id,
+                        "output_index": 0,
+                        "summary_index": 0,
+                        "part": {"type": "summary_text", "text": ""},
+                    })
+                reasoning_text += rc_delta
+                await _write_event(write, "response.reasoning_summary_text.delta", {
+                    "type": "response.reasoning_summary_text.delta",
+                    "item_id": reasoning_id,
+                    "output_index": 0,
+                    "summary_index": 0,
+                    "delta": rc_delta,
+                })
+
+            # --- Content delta (may contain inline <think> tags) ---
+            content_delta = delta.get("content") or ""
+            if content_delta:
+                text_deltas, reasoning_deltas, inline_think_mode, inline_think_buffer = (
+                    _process_stream_content_delta(
+                        content_delta, inline_think_mode, inline_think_buffer,
+                    )
+                )
+                for rdelta in reasoning_deltas:
+                    if not reasoning_started:
+                        reasoning_started = True
+                        await _write_event(write, "response.output_item.added", {
                             "type": "response.output_item.added",
+                            "output_index": output_index,
+                            "item": {
+                                "id": reasoning_id,
+                                "type": "reasoning",
+                                "status": "in_progress",
+                                "reasoning_content": "",
+                                "summary": [],
+                            },
+                        })
+                        output_index += 1
+                    if not reasoning_summary_started:
+                        reasoning_summary_started = True
+                        await _write_event(write, "response.reasoning_summary_part.added", {
+                            "type": "response.reasoning_summary_part.added",
+                            "item_id": reasoning_id,
                             "output_index": 0,
+                            "summary_index": 0,
+                            "part": {"type": "summary_text", "text": ""},
+                        })
+                    reasoning_text += rdelta
+                    await _write_event(write, "response.reasoning_summary_text.delta", {
+                        "type": "response.reasoning_summary_text.delta",
+                        "item_id": reasoning_id,
+                        "output_index": 0,
+                        "summary_index": 0,
+                        "delta": rdelta,
+                    })
+                for tdelta in text_deltas:
+                    full_text += tdelta
+                    if not text_item_started:
+                        text_item_started = True
+                        await _write_event(write, "response.output_item.added", {
+                            "type": "response.output_item.added",
+                            "output_index": output_index,
                             "item": {
                                 "id": message_id,
                                 "type": "message",
@@ -202,63 +308,171 @@ async def translate_stream(source: Any, write: Any, model: str) -> None:
                                 "role": "assistant",
                                 "content": [],
                             },
-                        },
-                    )
-                if not content_started:
-                    content_started = True
-                    await _write_event(
-                        write,
-                        "response.content_part.added",
-                        {
+                        })
+                        output_index += 1
+                    if not text_content_started:
+                        text_content_started = True
+                        await _write_event(write, "response.content_part.added", {
                             "type": "response.content_part.added",
                             "item_id": message_id,
                             "output_index": 0,
                             "content_index": 0,
                             "part": {"type": "output_text", "text": "", "annotations": []},
-                        },
-                    )
-                await _write_event(
-                    write,
-                    "response.output_text.delta",
-                    {
+                        })
+                    await _write_event(write, "response.output_text.delta", {
                         "type": "response.output_text.delta",
                         "item_id": message_id,
                         "output_index": 0,
                         "content_index": 0,
-                        "delta": chunk_text,
-                    },
-                )
+                        "delta": tdelta,
+                    })
 
-            if "usage" in data:
-                final_usage = data["usage"]
+            # --- Tool call deltas ---
+            tc_deltas = delta.get("tool_calls")
+            if tc_deltas:
+                for tc in tc_deltas:
+                    if not isinstance(tc, dict):
+                        continue
+                    idx = tc.get("index", 0)
+                    if idx not in tool_call_state:
+                        call_id = tc.get("id", f"call_{idx}")
+                        fn = tc.get("function", {})
+                        name = fn.get("name", "unknown_tool") if isinstance(fn, dict) else "unknown_tool"
+                        item_id = f"fc_{call_id}"
+                        tool_call_state[idx] = {
+                            "call_id": call_id,
+                            "name": name,
+                            "arguments": "",
+                            "item_id": item_id,
+                            "output_index": output_index,
+                        }
+                        output_index += 1
+                        await _write_event(write, "response.output_item.added", {
+                            "type": "response.output_item.added",
+                            "output_index": tool_call_state[idx]["output_index"],
+                            "item": {
+                                "id": item_id,
+                                "type": "function_call",
+                                "status": "in_progress",
+                                "call_id": call_id,
+                                "name": name,
+                                "arguments": "",
+                            },
+                        })
+                    else:
+                        tc_id = tc.get("id")
+                        if tc_id:
+                            tool_call_state[idx]["call_id"] = tc_id
+                            tool_call_state[idx]["item_id"] = f"fc_{tc_id}"
+                        fn = tc.get("function", {})
+                        if isinstance(fn, dict):
+                            tc_name = fn.get("name")
+                            if tc_name:
+                                tool_call_state[idx]["name"] = tc_name
+                            tc_args = fn.get("arguments", "")
+                            if tc_args:
+                                tool_call_state[idx]["arguments"] += tc_args
+                                await _write_event(write, "response.function_call_arguments.delta", {
+                                    "type": "response.function_call_arguments.delta",
+                                    "item_id": tool_call_state[idx]["item_id"],
+                                    "output_index": tool_call_state[idx]["output_index"],
+                                    "delta": tc_args,
+                                })
 
-    completed_message = {
-        "id": message_id,
-        "type": "message",
-        "status": "completed",
-        "role": "assistant",
-        "content": [{"type": "output_text", "text": full_text, "annotations": []}],
-    }
+    # Flush inline think buffer on stream end
+    if inline_think_buffer:
+        if inline_think_mode == "reasoning" and inline_think_buffer:
+            reasoning_text += inline_think_buffer
+        elif inline_think_mode == "text" and inline_think_buffer:
+            full_text += inline_think_buffer
 
-    await _write_event(
-        write,
-        "response.output_item.done",
-        {"type": "response.output_item.done", "item": completed_message},
-    )
+    # --- Finalize: reasoning ---
+    if reasoning_started and reasoning_text:
+        await _write_event(write, "response.reasoning_summary_text.done", {
+            "type": "response.reasoning_summary_text.done",
+            "item_id": reasoning_id,
+            "output_index": 0,
+            "summary_index": 0,
+            "text": reasoning_text,
+        })
+        await _write_event(write, "response.reasoning_summary_part.done", {
+            "type": "response.reasoning_summary_part.done",
+            "item_id": reasoning_id,
+            "output_index": 0,
+            "summary_index": 0,
+            "part": {"type": "summary_text", "text": reasoning_text},
+        })
+        await _write_event(write, "response.output_item.done", {
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {
+                "id": reasoning_id,
+                "type": "reasoning",
+                "reasoning_content": reasoning_text,
+                "summary": [{"type": "summary_text", "text": reasoning_text}],
+            },
+        })
 
-    if full_text:
-        await _write_event(
-            write,
-            "response.content_part.done",
-            {
+    # --- Finalize: text message ---
+    output_items: list[dict[str, Any]] = []
+    if reasoning_started and reasoning_text:
+        output_items.append({
+            "id": reasoning_id,
+            "type": "reasoning",
+            "reasoning_content": reasoning_text,
+            "summary": [{"type": "summary_text", "text": reasoning_text}],
+        })
+
+    if text_item_started:
+        completed_message = {
+            "id": message_id,
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": full_text, "annotations": []}],
+        }
+        await _write_event(write, "response.output_item.done", {
+            "type": "response.output_item.done",
+            "output_index": 1 if reasoning_started else 0,
+            "item": completed_message,
+        })
+        if full_text:
+            await _write_event(write, "response.content_part.done", {
                 "type": "response.content_part.done",
                 "item_id": message_id,
-                "output_index": 0,
+                "output_index": 1 if reasoning_started else 0,
                 "content_index": 0,
                 "part": {"type": "output_text", "text": full_text, "annotations": []},
-            },
-        )
+            })
+        output_items.append(completed_message)
 
+    # --- Finalize: tool calls ---
+    sorted_tcs = sorted(tool_call_state.values(), key=lambda tc: tc["output_index"])
+    for tc in sorted_tcs:
+        args = tc["arguments"]
+        await _write_event(write, "response.function_call_arguments.done", {
+            "type": "response.function_call_arguments.done",
+            "item_id": tc["item_id"],
+            "output_index": tc["output_index"],
+            "arguments": args,
+        })
+        tc_item = {
+            "id": tc["item_id"],
+            "type": "function_call",
+            "status": "completed",
+            "call_id": tc["call_id"],
+            "name": tc["name"],
+            "arguments": args,
+        }
+        output_items.append(tc_item)
+        await _write_event(write, "response.output_item.done", {
+            "type": "response.output_item.done",
+            "output_index": tc["output_index"],
+            "item": tc_item,
+        })
+
+    # --- response.completed ---
+    status = "incomplete" if finish_reason == "length" else "completed"
     response_usage: dict[str, Any] = {}
     if final_usage:
         response_usage = {
@@ -267,23 +481,84 @@ async def translate_stream(source: Any, write: Any, model: str) -> None:
             "total_tokens": final_usage.get("total_tokens", 0),
         }
 
-    await _write_event(
-        write,
-        "response.completed",
-        {
-            "type": "response.completed",
-            "response": {
-                "id": response_id,
-                "object": "response",
-                "created_at": created_at,
-                "status": "completed",
-                "model": model,
-                "output": [completed_message],
-                "usage": response_usage,
-            },
-        },
-    )
+    completed_response: dict[str, Any] = {
+        "id": response_id,
+        "object": "response",
+        "created_at": created_at,
+        "status": status,
+        "model": model,
+        "output": output_items,
+        "usage": response_usage,
+    }
+    if status == "incomplete":
+        completed_response["incomplete_details"] = {"reason": "max_output_tokens"}
 
+    await _write_event(write, "response.completed", {
+        "type": "response.completed",
+        "response": completed_response,
+    })
+
+
+def _process_stream_content_delta(
+    delta_text: str,
+    mode: str,
+    buffer: str,
+) -> tuple[list[str], list[str], str, str]:
+    """Parse inline <think> tags from a stream content delta.
+
+    Returns (text_deltas, reasoning_deltas, new_mode, new_buffer).
+    """
+    text_deltas: list[str] = []
+    reasoning_deltas: list[str] = []
+
+    buffer += delta_text
+
+    while buffer:
+        if mode == "detecting":
+            stripped = buffer.lstrip()
+            if not stripped:
+                break
+            if stripped.startswith("<think>"):
+                mode = "reasoning"
+                buffer = stripped[len("<think>"):]
+            elif "<think>".startswith(stripped):
+                break  # partial tag, wait for more
+            else:
+                mode = "text"
+        elif mode == "reasoning":
+            close_pos = buffer.find("</think>")
+            if close_pos == -1:
+                if buffer:
+                    reasoning_deltas.append(buffer)
+                    buffer = ""
+                break
+            else:
+                if close_pos > 0:
+                    reasoning_deltas.append(buffer[:close_pos])
+                post = buffer[close_pos + len("</think>"):]
+                mode = "text"
+                buffer = post
+        elif mode == "text":
+            close_pos = buffer.find("<think>")
+            if close_pos == -1:
+                partial = buffer.rfind("<")
+                if partial != -1 and "<think>".startswith(buffer[partial:]):
+                    if partial > 0:
+                        text_deltas.append(buffer[:partial])
+                    buffer = buffer[partial:]
+                    mode = "detecting"
+                    break
+                elif buffer:
+                    text_deltas.append(buffer)
+                    buffer = ""
+                break
+            else:
+                if close_pos > 0:
+                    text_deltas.append(buffer[:close_pos])
+                buffer = buffer[close_pos + len("<think>"):]
+                mode = "reasoning"
+
+    return text_deltas, reasoning_deltas, mode, buffer
 
 async def handle_responses(request: web.Request) -> web.StreamResponse:
     """Handle POST /v1/responses requests."""
@@ -415,6 +690,19 @@ def resolve_upstream_api_key(request: web.Request, settings: ProxySettings) -> t
     return "", "missing"
 
 
+def _ensure_tool_reasoning(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """DeepSeek requires reasoning_content on assistant messages that carry tool_calls.
+
+    Some providers reject assistant tool-call messages without reasoning_content.
+    This injects a minimal placeholder so multi-turn tool use works.
+    """
+    for msg in messages:
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            if not msg.get("reasoning_content", "").strip():
+                msg["reasoning_content"] = "tool call"
+    return messages
+
+
 def _translate_input_item(item: Any) -> dict[str, Any] | None:
     if isinstance(item, str):
         return {"role": "user", "content": item}
@@ -432,6 +720,7 @@ def _translate_input_item(item: Any) -> dict[str, Any] | None:
         return {
             "role": "assistant",
             "content": None,
+            "reasoning_content": "tool call",
             "tool_calls": [
                 {
                     "id": item.get("call_id", ""),
@@ -444,25 +733,77 @@ def _translate_input_item(item: Any) -> dict[str, Any] | None:
             ],
         }
 
-    if item_type == "function_call_output":
+    if item_type == "custom_tool_call":
+        input_val = item.get("input", "")
+        if not isinstance(input_val, str):
+            input_val = json.dumps(input_val, ensure_ascii=False)
+        return {
+            "role": "assistant",
+            "content": None,
+            "reasoning_content": "tool call",
+            "tool_calls": [
+                {
+                    "id": item.get("call_id", ""),
+                    "type": "function",
+                    "function": {
+                        "name": item.get("name", ""),
+                        "arguments": json.dumps({"input": input_val}),
+                    },
+                }
+            ],
+        }
+
+    if item_type in ("function_call_output", "custom_tool_call_output"):
+        call_id = item.get("call_id", "")
         output = item.get("output", "")
         if not isinstance(output, str):
             output = json.dumps(output, ensure_ascii=False)
         return {
             "role": "tool",
-            "tool_call_id": item.get("call_id", ""),
+            "tool_call_id": call_id,
             "content": output,
         }
 
     return None
 
 
-def _translate_tool(tool: Any) -> dict[str, Any] | None:
+def _translate_tool(tool: Any) -> dict[str, Any] | list[dict[str, Any]] | None:
+    """Translate a Responses API tool definition into Chat Completions format.
+
+    Returns a single tool dict, a list of tool dicts (for namespace expansion),
+    or None if the tool cannot be translated.
+    """
     if not isinstance(tool, dict):
         return None
 
     if tool.get("type") == "function" and isinstance(tool.get("function"), dict):
         return tool
+
+    if tool.get("type") == "namespace":
+        namespace = tool.get("name", "")
+        children = tool.get("tools", [])
+        if not children or not isinstance(children, list):
+            return None
+        results: list[dict[str, Any]] = []
+        for child in children:
+            if not isinstance(child, dict):
+                continue
+            fn = child.get("function", {}) if isinstance(child.get("function"), dict) else {}
+            child_name = child.get("name") or fn.get("name")
+            if not child_name:
+                continue
+            chat_name = f"{namespace}__{child_name}" if namespace else child_name
+            child_desc = child.get("description") or fn.get("description", "")
+            child_params = child.get("parameters") or fn.get("parameters") or child.get("input_schema") or {}
+            results.append({
+                "type": "function",
+                "function": {
+                    "name": chat_name,
+                    "description": child_desc,
+                    "parameters": child_params,
+                },
+            })
+        return results if results else None
 
     function = {key: value for key, value in tool.items() if key != "type" and value is not None}
     if "name" not in function:
